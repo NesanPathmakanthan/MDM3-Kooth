@@ -1,0 +1,89 @@
+import pandas as pd
+import networkx as nx
+import matplotlib.pyplot as plt
+
+# Load the data
+file_path = '/Users/isobelbridge/Documents/mdm4/simulated_kooth_data.csv'
+df = pd.read_csv(file_path)
+
+# **Graph 1: Content_Created_ID as Nodes (Reverse Edge Direction)**
+# Initialize directed graph
+G_content = nx.DiGraph()
+
+# Add nodes with attributes: Content_Created_ID
+for _, row in df.iterrows():
+    G_content.add_node(
+        row['Content_Created_ID'], 
+        service_user_id=row['Service_User_ID'], 
+        content_type=row['Content_Type']
+    )
+
+# Add edges where Ancestor_Content_ID exists (Reverse Direction: Child -> Ancestor)
+for _, row in df.iterrows():
+    if not pd.isna(row['Ancestor_Content_ID']):  # Check for ancestor
+        G_content.add_edge(row['Content_Created_ID'], row['Ancestor_Content_ID'])
+
+# Color nodes by Service_User_ID
+user_ids = df['Service_User_ID'].unique()
+user_color_map = {user: idx for idx, user in enumerate(user_ids)}  # Map users to colors
+node_colors_content = [
+    user_color_map[G_content.nodes[node]['service_user_id']] for node in G_content.nodes
+]
+
+# **Graph 2: Service_User_ID as Nodes (Allow Self-Loops)**
+# Initialize directed graph for Service_User_ID
+G_user = nx.DiGraph()
+
+# Add nodes for each unique Service_User_ID
+for user_id in df['Service_User_ID'].unique():
+    G_user.add_node(user_id)
+
+# Add edges based on content interactions (Allow Self-Loops)
+for _, row in df.iterrows():
+    if not pd.isna(row['Ancestor_Content_ID']):  # Check for ancestor
+        # Find the Service_User_ID of the ancestor content
+        ancestor_row = df[df['Content_Created_ID'] == row['Ancestor_Content_ID']]
+        if not ancestor_row.empty:
+            ancestor_user_id = ancestor_row.iloc[0]['Service_User_ID']
+            current_user_id = row['Service_User_ID']
+            # Allow self-loops
+            G_user.add_edge(current_user_id, ancestor_user_id)
+
+# Create Subplots
+fig, axes = plt.subplots(1, 2, figsize=(20, 10))
+
+# Plot Graph 1: Content_Created_ID as Nodes (Reverse Edges)
+ax1 = axes[0]
+pos_content = nx.spring_layout(G_content, seed=42)  # Positioning for better visualization
+nx.draw(
+    G_content,
+    pos_content,
+    with_labels=True,
+    ax=ax1,
+    node_size=700,
+    node_color=node_colors_content,
+    cmap=plt.cm.tab10,  # Use a colormap
+    font_size=8,
+    edge_color="gray",
+)
+ax1.set_title("Graph 1: Content_Created_ID as Nodes (Reversed Edges)", fontsize=16)
+
+# Plot Graph 2: Service_User_ID as Nodes (With Self-Loops)
+ax2 = axes[1]
+pos_user = nx.spring_layout(G_user, seed=42)  # Positioning for better visualization
+nx.draw(
+    G_user,
+    pos_user,
+    with_labels=True,
+    ax=ax2,
+    node_size=700,
+    node_color=range(len(G_user.nodes)),  # Different colors for each node
+    cmap=plt.cm.tab10,  # Use a colormap
+    font_size=8,
+    edge_color="gray",
+)
+ax2.set_title("Graph 2: Service_User_ID as Nodes (With Self-Loops)", fontsize=16)
+
+# Show the combined plot
+plt.tight_layout()
+plt.show()
