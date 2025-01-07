@@ -1,88 +1,125 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-#  Parameters
+
+# Parameters
 n_users = 20
-n_content = 100
-topics = ["Anxiety", "LGBTQ+", "Neurodiversity", "Depression"]
+n_posts = 200  # Total number of posts
+n_communities = 5  # Number of communities
+community_size = n_users // n_communities
+topics = ["Anxiety", "Depression", "LGBTQ+", "Neurodiversity"]
 content_types = ["Article", "Forum", "Article Comment", "Forum Comment"]
+base_time = datetime(2024, 9, 1)
 
-# Generate synthetic data
-np.random.seed(42)
+# Initialize Users and Communities
+users = [f"SU{i}" for i in range(1, n_users + 1)]
+communities = [users[i:i + community_size] for i in range(0, n_users, community_size)]
 
-# Define a global pool of user IDs limited by n_users
-user_pool = [f"SU{i}" for i in range(1, n_users + 1)]
-
-# Define topic-based engagement patterns
-topic_engagement = {
-    "Anxiety": {"views_mean": 50, "comments_mean": 10},
-    "LGBTQ+": {"views_mean": 30, "comments_mean": 8},
-    "Neurodiversity": {"views_mean": 20, "comments_mean": 5},
-    "Depression": {"views_mean": 40, "comments_mean": 7},
+# deciding what topic binds the community, could change to be purely one but wanted it to b realistic 
+community_topic_probs = {
+    0: [0.6, 0.3, 0.1, 0.0],  # Community 0 focuses on Anxiety and Depression
+    1: [0.1, 0.1, 0.5, 0.3],  # Community 1 focuses on LGBTQ+ and Neurodiversity
+    2: [0.3, 0.3, 0.2, 0.2],  # Mixed focus
+    3: [0.4, 0.05, 0.5, 0.05],  # High focus on Anxiety and LGBTQ
+    4: [0.1, 0.3, 0.3, 0.3],  # Mixed focus
 }
 
-# Define topic-based content type probabilities
-topic_content_type_probs = {
-    "Anxiety": [0.2, 0.1, 0.4, 0.3],
-    "LGBTQ+": [0.1, 0.1, 0.5, 0.3],
-    "Neurodiversity": [0.1, 0.2, 0.3, 0.4],
-    "Depression": [0.2, 0.1, 0.4, 0.3],
-}
+# whether its more likely to be article, forum, article comment or forum comment
+content_type_probs = [0.2, 0.2, 0.3, 0.3]  # comments are more likely
 
-# Initialize data and ancestor content tracker
+# GENERATING TIME STAMPS (not needed for networks currently but could come in handy)
+# using gaussian to have peak times of activity in mornings and evenings
+def hourly_activity_distribution(hour):
+    morning_peak = np.exp(-((hour - 10) ** 2) / (2 * 2 ** 2))  # Peak at 10 AM
+    evening_peak = np.exp(-((hour - 20) ** 2) / (2 * 2 ** 2))  # Peak at 8 PM
+    return morning_peak + evening_peak
+
+# Normalize the distribution over 24 hours
+hourly_activity = np.array([hourly_activity_distribution(hour) for hour in range(24)])
+hourly_activity /= hourly_activity.sum()  # Normalize to ensure sum = 1
+
+# Generate timestamps based on time of day
+def generate_timestamps(n_posts):
+    timestamps = []
+    for _ in range(n_posts):
+        # Pick a random day and hour based on hourly_activity
+        day_offset = np.random.randint(0, 30)  # Simulate posts over a month
+        hour = int(np.random.choice(range(24), p=hourly_activity))  # Convert to int
+        minute = int(np.random.randint(0, 60))  # Convert to int
+        second = int(np.random.randint(0, 60))  # Convert to int
+        timestamps.append(base_time + timedelta(days=day_offset, hours=hour, minutes=minute, seconds=second))
+    return timestamps
+
+# Generate timestamps
+timestamps = generate_timestamps(n_posts)
+
+# creating exponential curve for activity to replicate how some individuals are more active than others.
+activity_levels = np.random.exponential(scale=1.0, size=n_users)  # Exponential distribution
+activity_levels /= activity_levels.sum()  # Normalize to sum to 1
+user_post_counts = {user: int(n_posts * activity_levels[idx] * 2) for idx, user in enumerate(users)}
+print(user_post_counts)
+# CREATING THE DATA
+# Data storage
 data = []
-content_tracker = []  # Track existing content with type for ancestor selection
+content_tracker = []  # To track content and users
 
-for i in range(n_content):
-    # Randomly choose a topic
-    topic = np.random.choice(topics, p=[0.3, 0.2, 0.2, 0.3])
-    
-    # Generate user ID from the limited user pool
-    user_id = np.random.choice(user_pool)
-    
-    # Generate content type based on topic
-    content_type = np.random.choice(content_types, p=topic_content_type_probs[topic])
-    
-    # Generate views and comments based on topic engagement patterns
-    views = max(0, np.random.poisson(topic_engagement[topic]["views_mean"]))
-    comments = max(0, np.random.poisson(topic_engagement[topic]["comments_mean"]))
-    
-    # Generate timestamps
-    created_timestamp = datetime(2024, 9, 1) + timedelta(hours=np.random.randint(0, 720))
-    moderated_timestamp = created_timestamp + timedelta(hours=np.random.randint(1, 48))
-    
-    # Generate ancestor content ID for comments
-    if content_type in ["Article Comment", "Forum Comment"]:
-        # Filter valid ancestors based on existing content
-        valid_ancestors = [c["Content_Created_ID"] for c in content_tracker if c["Content_Type"] in ["Article", "Forum"]]
-        ancestor_content_id = np.random.choice(valid_ancestors) if valid_ancestors else None
-    else:
-        ancestor_content_id = None
-    
-    # Add the new content to the tracker
-    content_tracker.append({
-        "Content_Created_ID": i + 1,
-        "Content_Type": content_type,
-    })
-    
-    # Add entry to data
-    data.append({
-        "Content_Created_ID": i + 1,
-        "Created_Timestamp": created_timestamp,
-        "Moderated_Timestamp": moderated_timestamp,
-        "Service_User_ID": user_id,
-        "Content_Topic": topic,
-        "Content_Type": content_type,
-        "Views": views,
-        "Comments": comments,
-        "Ancestor_Content_ID": ancestor_content_id,
-    })
+# Simulate content creation
+content_id = 1
+for user, post_count in user_post_counts.items():
+    # Generate posts for each user
+    for _ in range(post_count):
+        # Assign user to a community based on their ID
+        community_idx = next(idx for idx, community in enumerate(communities) if user in community)
+        
+        # Determine topic and content type
+        topic = np.random.choice(topics, p=community_topic_probs[community_idx])
+        content_type = np.random.choice(content_types, p=content_type_probs)
+        
+        # Assign a timestamp
+        timestamp = np.random.choice(timestamps)
+        
+        # Determine Ancestor_Content_ID for comments
+        if content_type in ["Article Comment", "Forum Comment"]:
+            # Prefer ancestors within the same community
+            valid_ancestors = [
+                c["Content_Created_ID"]
+                for c in content_tracker
+                if c["Service_User_ID"] in communities[community_idx] and c["Content_Type"] in ["Article", "Forum"]
+            ]
+            # allow cross-community interactions
+            if np.random.rand() < 0.3:
+                valid_ancestors.extend([
+                    c["Content_Created_ID"]
+                    for c in content_tracker
+                    if c["Content_Type"] in ["Article", "Forum"]
+                ])
+            ancestor_content_id = np.random.choice(valid_ancestors) if valid_ancestors else None
+        else:
+            ancestor_content_id = None
+        
+        # Save content information
+        content_tracker.append({
+            "Content_Created_ID": content_id,
+            "Content_Type": content_type,
+            "Service_User_ID": user
+        })
+        
+        data.append({
+            "Content_Created_ID": content_id,
+            "Service_User_ID": user,
+            "Content_Type": content_type,
+            "Content_Topic": topic,
+            "Timestamp": timestamp,
+            "Ancestor_Content_ID": ancestor_content_id,
+            "Community_ID": community_idx,  # Ground truth for evaluation
+        })
+        
+        content_id += 1
+
 
 # Create DataFrame
 df = pd.DataFrame(data)
 
-# Save the DataFrame to a CSV file
+# Save to CSV
 file_path = "/Users/isobelbridge/Documents/mdm4/simulated_kooth_data.csv"
 df.to_csv(file_path, index=False)
-
-print(f"File saved to: {file_path}")

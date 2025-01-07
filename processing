@@ -1,89 +1,113 @@
 import pandas as pd
 import networkx as nx
 import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.metrics import normalized_mutual_info_score, adjusted_rand_score
+import community.community_louvain as community_louvain
 
 # Load the data
 file_path = '/Users/isobelbridge/Documents/mdm4/simulated_kooth_data.csv'
 df = pd.read_csv(file_path)
 
-# **Graph 1: Content_Created_ID as Nodes (Reverse Edge Direction)**
-# Initialize directed graph
-G_content = nx.DiGraph()
-
-# Add nodes with attributes: Content_Created_ID
+# CALCULATE WEIGHTING OF EDGES
+# counting how many pieces of content of each topic each user has 
+topic_counts = {user_id: {topic: 0 for topic in ["Anxiety", "Depression", "LGBTQ+", "Neurodiversity"]}
+                for user_id in df['Service_User_ID'].unique()}
 for _, row in df.iterrows():
-    G_content.add_node(
-        row['Content_Created_ID'], 
-        service_user_id=row['Service_User_ID'], 
-        content_type=row['Content_Type']
-    )
+    topic_counts[row['Service_User_ID']][row['Content_Topic']] += 1
 
-# Add edges where Ancestor_Content_ID exists (Reverse Direction: Child -> Ancestor)
-for _, row in df.iterrows():
-    if not pd.isna(row['Ancestor_Content_ID']):  # Check for ancestor
-        G_content.add_edge(row['Content_Created_ID'], row['Ancestor_Content_ID'])
+# Convert topic counts to percentages
+topic_distributions = {}
+for user_id, counts in topic_counts.items():
+    total = sum(counts.values())
+    topic_distributions[user_id] = {topic: counts[topic] / total if total > 0 else 0 for topic in counts}
 
-# Color nodes by Service_User_ID
-user_ids = df['Service_User_ID'].unique()
-user_color_map = {user: idx for idx, user in enumerate(user_ids)}  # Map users to colors
-node_colors_content = [
-    user_color_map[G_content.nodes[node]['service_user_id']] for node in G_content.nodes
-]
+# Convert distributions to vectors for similarity calculation. similarity calculation = edge weighting
+user_vectors = {user: np.array(list(distribution.values())) for user, distribution in topic_distributions.items()}
 
-# **Graph 2: Service_User_ID as Nodes (Allow Self-Loops)**
-# Initialize directed graph for Service_User_ID
+# BUILDING NETWORK
 G_user = nx.DiGraph()
-
-# Add nodes for each unique Service_User_ID
+# add nodes for each user
 for user_id in df['Service_User_ID'].unique():
     G_user.add_node(user_id)
 
-# Add edges based on content interactions (Allow Self-Loops)
+# Add edges with weights based on topic distribution similarity
 for _, row in df.iterrows():
-    if not pd.isna(row['Ancestor_Content_ID']):  # Check for ancestor
-        # Find the Service_User_ID of the ancestor content
+    if not pd.isna(row['Ancestor_Content_ID']):  # Check for ancestor, this ancestor represents the node its connecting with 
+        # Find the user (node) of the ancestor content
         ancestor_row = df[df['Content_Created_ID'] == row['Ancestor_Content_ID']]
         if not ancestor_row.empty:
             ancestor_user_id = ancestor_row.iloc[0]['Service_User_ID']
             current_user_id = row['Service_User_ID']
-            # Allow self-loops
-            G_user.add_edge(current_user_id, ancestor_user_id)
+            
+            # Compute cosine similarity between the topic distributions of the two users to calculate weight of edge
+            similarity = cosine_similarity(
+                user_vectors[current_user_id].reshape(1, -1),
+                user_vectors[ancestor_user_id].reshape(1, -1)
+            )[0, 0]
+            
+            # Add edge with weight
+            if G_user.has_edge(current_user_id, ancestor_user_id):
+                G_user[current_user_id][ancestor_user_id]['weight'] += similarity
+            else:
+                G_user.add_edge(current_user_id, ancestor_user_id, weight=similarity)
 
-# Create Subplots
-fig, axes = plt.subplots(1, 2, figsize=(20, 10))
+# IDENTIFYING PREDICTED COMMUNITIES
+connected_nodes = {node for edge in G_user.edges() for node in edge}  # Nodes with at least one edge
+G_connected = G_user.subgraph(connected_nodes)  # Subgraph with only connected nodes
 
-# Plot Graph 1: Content_Created_ID as Nodes (Reverse Edges)
-ax1 = axes[0]
-pos_content = nx.spring_layout(G_content, seed=42)  # Positioning for better visualization
+# Perform community detection on the connected subgraph
+partition = community_louvain.best_partition(G_connected.to_undirected(), weight='weight')
+
+# IDENTIFYING ACTUAL COMMUNITIES (based on topics in fake generated data)
+# getting label from the data for which community each user belongs to
+ground_truth = {row['Service_User_ID']: row['Community_ID'] for _, row in df.iterrows() if row['Service_User_ID'] in connected_nodes}
+
+# putting actual and predicted labels into a list so they can be compared and plotted
+true_labels = []
+predicted_labels = []
+
+for user in G_connected.nodes():
+    true_labels.append(ground_truth.get(user, -1))  # Use -1 for missing ground truth
+    predicted_labels.append(partition.get(user, -1))  # Use -1 for missing prediction
+
+# CALCULATING ACCURACY USING NMI (can't just use plain accuracy because it doesn't know how many communities to look for)
+nmi = normalized_mutual_info_score(true_labels, predicted_labels)
+print(f"Normalized Mutual Information (NMI): {nmi:.4f}")
+
+# GRAPHING FULL NETWORK
+plt.figure(figsize=(12, 6))
+pos = nx.kamada_kawai_layout(G_connected)
+
+# Plot 1: Ground Truth Communities
+plt.subplot(1, 2, 1)
+ground_truth_colors = [ground_truth.get(node, -1) for node in G_connected.nodes()]
 nx.draw(
-    G_content,
-    pos_content,
-    with_labels=True,
-    ax=ax1,
-    node_size=700,
-    node_color=node_colors_content,
-    cmap=plt.cm.tab10,  # Use a colormap
-    font_size=8,
-    edge_color="gray",
+    G_connected,
+    pos,
+    with_labels=True,  # Disable node labels
+    node_color=ground_truth_colors,
+    cmap=plt.cm.tab10,  # Color map for communities
+    node_size=600,  # Set node size to 50
+    edge_color="gray" # Disable edges
 )
-ax1.set_title("Graph 1: Content_Created_ID as Nodes (Reversed Edges)", fontsize=16)
+plt.title("Actual Communities (Connected Nodes)", fontsize=16)
 
-# Plot Graph 2: Service_User_ID as Nodes (With Self-Loops)
-ax2 = axes[1]
-pos_user = nx.spring_layout(G_user, seed=42)  # Positioning for better visualization
+# Plot 2: Detected Communities
+plt.subplot(1, 2, 2)
+detected_colors = [partition.get(node, -1) for node in G_connected.nodes()]
 nx.draw(
-    G_user,
-    pos_user,
-    with_labels=True,
-    ax=ax2,
-    node_size=700,
-    node_color=range(len(G_user.nodes)),  # Different colors for each node
-    cmap=plt.cm.tab10,  # Use a colormap
-    font_size=8,
-    edge_color="gray",
+    G_connected,
+    pos,
+    with_labels=True,  # Disable node labels
+    node_color=detected_colors,
+    cmap=plt.cm.tab10,
+    node_size=600,  # Set node size to 50
+    edge_color="gray" # Disable edges
 )
-ax2.set_title("Graph 2: Service_User_ID as Nodes (With Self-Loops)", fontsize=16)
+plt.title("Detected Communities (Louvain, Connected Nodes)", fontsize=16)
 
-# Show the combined plot
 plt.tight_layout()
 plt.show()
+
