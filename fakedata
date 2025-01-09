@@ -3,123 +3,137 @@ import numpy as np
 from datetime import datetime, timedelta
 
 # Parameters
-n_users = 20
-n_posts = 200  # Total number of posts
-n_communities = 5  # Number of communities
-community_size = n_users // n_communities
+n_users = 20 # no of users
+n_posts = 5000  # no of posts
+n_topics = 4  # no of topics
 topics = ["Anxiety", "Depression", "LGBTQ+", "Neurodiversity"]
 content_types = ["Article", "Forum", "Article Comment", "Forum Comment"]
-base_time = datetime(2024, 9, 1)
+base_time = datetime(2024, 1, 1)
+community_focus = {0: "Anxiety", 1: "Depression", 2: "LGBTQ+", 3: "Neurodiversity"}
 
-# Initialize Users and Communities
+# creating users
 users = [f"SU{i}" for i in range(1, n_users + 1)]
-communities = [users[i:i + community_size] for i in range(0, n_users, community_size)]
-
-# deciding what topic binds the community, could change to be purely one but wanted it to b realistic 
-community_topic_probs = {
-    0: [0.6, 0.3, 0.1, 0.0],  # Community 0 focuses on Anxiety and Depression
-    1: [0.1, 0.1, 0.5, 0.3],  # Community 1 focuses on LGBTQ+ and Neurodiversity
-    2: [0.3, 0.3, 0.2, 0.2],  # Mixed focus
-    3: [0.4, 0.05, 0.5, 0.05],  # High focus on Anxiety and LGBTQ
-    4: [0.1, 0.3, 0.3, 0.3],  # Mixed focus
+# dirichlet distribution assigns 4 probabilities of the post being on each topic for each user 
+user_topic_probs = {
+    user: np.random.dirichlet(alpha=[1] * n_topics).tolist() for user in users  # Random initial probabilities
 }
+# highest probability is extracted and user is assiged to community based on that topic
+# does not mean the users post will be on this topic as the post is generated based on probabilities 
+user_communities = {
+    user: np.argmax(probs) for user, probs in user_topic_probs.items()  # Initial community (highest probability)
+}
+# uses gaussian distribution and asisgns time stamps with peaks at 10am and 8pm
+# not that neccessary but makes it more realistic 
+hourly_activity = np.array([np.exp(-((hour - 10) ** 2) / (2 * 2 ** 2)) +
+                            np.exp(-((hour - 20) ** 2) / (2 * 2 ** 2)) for hour in range(24)])
+hourly_activity /= hourly_activity.sum()  # normalise
 
-# whether its more likely to be article, forum, article comment or forum comment
-content_type_probs = [0.2, 0.2, 0.3, 0.3]  # comments are more likely
-
-# GENERATING TIME STAMPS (not needed for networks currently but could come in handy)
-# using gaussian to have peak times of activity in mornings and evenings
-def hourly_activity_distribution(hour):
-    morning_peak = np.exp(-((hour - 10) ** 2) / (2 * 2 ** 2))  # Peak at 10 AM
-    evening_peak = np.exp(-((hour - 20) ** 2) / (2 * 2 ** 2))  # Peak at 8 PM
-    return morning_peak + evening_peak
-
-# Normalize the distribution over 24 hours
-hourly_activity = np.array([hourly_activity_distribution(hour) for hour in range(24)])
-hourly_activity /= hourly_activity.sum()  # Normalize to ensure sum = 1
-
-# Generate timestamps based on time of day
+# creates time stamps 
 def generate_timestamps(n_posts):
     timestamps = []
     for _ in range(n_posts):
-        # Pick a random day and hour based on hourly_activity
-        day_offset = np.random.randint(0, 30)  # Simulate posts over a month
-        hour = int(np.random.choice(range(24), p=hourly_activity))  # Convert to int
-        minute = int(np.random.randint(0, 60))  # Convert to int
-        second = int(np.random.randint(0, 60))  # Convert to int
+        day_offset = int(np.random.randint(0, 365))
+        hour = int(np.random.choice(range(24), p=hourly_activity))
+        minute = int(np.random.randint(0, 60))
+        second = int(np.random.randint(0, 60))
         timestamps.append(base_time + timedelta(days=day_offset, hours=hour, minutes=minute, seconds=second))
     return timestamps
-
-# Generate timestamps
 timestamps = generate_timestamps(n_posts)
 
-# creating exponential curve for activity to replicate how some individuals are more active than others.
-activity_levels = np.random.exponential(scale=1.0, size=n_users)  # Exponential distribution
-activity_levels /= activity_levels.sum()  # Normalize to sum to 1
-user_post_counts = {user: int(n_posts * activity_levels[idx] * 2) for idx, user in enumerate(users)}
-print(user_post_counts)
-# CREATING THE DATA
-# Data storage
-data = []
-content_tracker = []  # To track content and users
+# activity follows exponential scale, few very active, most not very active
+# does mean no_posts wont be exactly as its defined but not sure it makes that much difference 
+activity_levels = np.random.exponential(scale=1.0, size=n_users)
+activity_levels /= activity_levels.sum()  # Normalize
+user_post_counts = {user: int(n_posts * activity_levels[idx]) for idx, user in enumerate(users)}
 
-# Simulate content creation
+# Drift function for how topic probabilities for each user change over time 
+# if they change enough then they are assigned to a new community 
+def drift_topic_probs(user_probs, drift_factor=0.02):
+    drift = drift_factor * np.random.dirichlet(alpha=[1] * len(user_probs))
+    new_probs = user_probs + drift
+    return new_probs / new_probs.sum()  # Normalize
+
+data = []
+content_tracker = []
+individual_user_data = [] 
+days = 365
+# SIMULATING DATA
 content_id = 1
-for user, post_count in user_post_counts.items():
-    # Generate posts for each user
-    for _ in range(post_count):
-        # Assign user to a community based on their ID
-        community_idx = next(idx for idx, community in enumerate(communities) if user in community)
-        
-        # Determine topic and content type
-        topic = np.random.choice(topics, p=community_topic_probs[community_idx])
-        content_type = np.random.choice(content_types, p=content_type_probs)
-        
-        # Assign a timestamp
-        timestamp = np.random.choice(timestamps)
-        
-        # Determine Ancestor_Content_ID for comments
-        if content_type in ["Article Comment", "Forum Comment"]:
-            # Prefer ancestors within the same community
+for day in range(days):  
+    for user, post_count in user_post_counts.items():
+        # Calculate new probabilities based on drift and assign community
+        user_topic_probs[user] = drift_topic_probs(user_topic_probs[user])
+        current_community = np.argmax(user_topic_probs[user])
+        user_communities[user] = current_community
+        # Creates array for number of posts over 365 days 
+        daily_post_count = np.random.multinomial(post_count, [1 / days] * days)[day]
+        for _ in range(daily_post_count):
+            # normalising probabilities so community structure is more defined 
+            # the more normalised it is the easier it is to detect communities 
+            transformed_probs = np.array(user_topic_probs[user]) ** 20  
+            transformed_probs /= transformed_probs.sum()  
+            # Determine the topic of the content
+            topic = np.random.choice(topics, p=transformed_probs)          
+            # Check if valid ancestors exist for the topic
             valid_ancestors = [
                 c["Content_Created_ID"]
                 for c in content_tracker
-                if c["Service_User_ID"] in communities[community_idx] and c["Content_Type"] in ["Article", "Forum"]
-            ]
-            # allow cross-community interactions
-            if np.random.rand() < 0.3:
-                valid_ancestors.extend([
-                    c["Content_Created_ID"]
-                    for c in content_tracker
-                    if c["Content_Type"] in ["Article", "Forum"]
-                ])
-            ancestor_content_id = np.random.choice(valid_ancestors) if valid_ancestors else None
-        else:
-            ancestor_content_id = None
-        
-        # Save content information
-        content_tracker.append({
-            "Content_Created_ID": content_id,
-            "Content_Type": content_type,
-            "Service_User_ID": user
-        })
-        
-        data.append({
-            "Content_Created_ID": content_id,
-            "Service_User_ID": user,
-            "Content_Type": content_type,
-            "Content_Topic": topic,
-            "Timestamp": timestamp,
-            "Ancestor_Content_ID": ancestor_content_id,
-            "Community_ID": community_idx,  # Ground truth for evaluation
-        })
-        
-        content_id += 1
+                if c["Content_Topic"] == topic and c["Content_Type"] in ["Article", "Forum"]
+            ]           
+            # Decide content type
+            if valid_ancestors:  # If ancestors exist, allow comments 
+                content_type = np.random.choice(content_types, p=[0.2, 0.2, 0.3, 0.3])
+                if content_type in ["Article Comment", "Forum Comment"]:
+                    ancestor_content_id = np.random.choice(valid_ancestors)
+                else:
+                    ancestor_content_id = None
+            else:  # If no ancestors exist, default to creating articles or forums because you cant have a comment on nothing
+                content_type = np.random.choice(["Article", "Forum"], p=[0.5, 0.5])
+                ancestor_content_id = None
+            
+            # Assign a timestamp
+            timestamp = base_time + timedelta(days=day) + timedelta(hours=int(np.random.choice(range(24), p=hourly_activity)))
 
+            # Save content information
+            content_data = {
+                "Content_Created_ID": content_id,
+                "Service_User_ID": user,
+                "Content_Type": content_type,
+                "Content_Topic": topic,
+                "Timestamp": timestamp,
+                "Ancestor_Content_ID": ancestor_content_id,
+                "Topic_Probs": user_topic_probs[user],  # only for evaluation of model cant be used for model itself 
+                "Community_ID": current_community  # ""
+            }
 
-# Create DataFrame
+            # append to trackers for simulation
+            content_tracker.append({
+                "Content_Created_ID": content_id,
+                "Content_Type": content_type,
+                "Service_User_ID": user,
+                "Community_ID": current_community,
+                "Content_Topic": topic
+            })
+
+            data.append(content_data)
+
+            # appending data for one user
+            # just for checking if its running properly
+            if user == "SU1":  
+                individual_user_data.append(content_data)
+
+            content_id += 1
+
+# Create DataFrames
 df = pd.DataFrame(data)
+individual_user_df = pd.DataFrame(individual_user_data)
 
-# Save to CSV
-file_path = "/Users/isobelbridge/Documents/mdm4/simulated_kooth_data.csv"
-df.to_csv(file_path, index=False)
+# main dataset
+file_path_main = "/Users/isobelbridge/Documents/mdm4/simulated_kooth_data.csv"
+df.to_csv(file_path_main, index=False)
+print(f"Main file saved to: {file_path_main}")
+
+# individual user dataset
+file_path_individual = "/Users/isobelbridge/Documents/mdm4/individual_user_data.csv"
+individual_user_df.to_csv(file_path_individual, index=False)
+print(f"Individual user file saved to: {file_path_individual}")
