@@ -48,10 +48,12 @@ user_post_counts = {user: int(n_posts * activity_levels[idx]) for idx, user in e
 
 # Drift function for how topic probabilities for each user change over time 
 # if they change enough then they are assigned to a new community 
-def drift_topic_probs(user_probs, drift_factor=0.02):
+def drift_topic_probs(user_probs, drift_factor=0.05, bias=None):
     drift = drift_factor * np.random.dirichlet(alpha=[1] * len(user_probs))
+    if bias is not None:
+        drift += bias  # Add bias for directional drift
     new_probs = user_probs + drift
-    return new_probs / new_probs.sum()  # Normalize
+    return new_probs / new_probs.sum()
 
 data = []
 content_tracker = []
@@ -70,7 +72,7 @@ for day in range(days):
         for _ in range(daily_post_count):
             # normalising probabilities so community structure is more defined 
             # the more normalised it is the easier it is to detect communities 
-            transformed_probs = np.array(user_topic_probs[user]) ** 20  
+            transformed_probs = np.array(user_topic_probs[user]) ** 30  
             transformed_probs /= transformed_probs.sum()  
             # Determine the topic of the content
             topic = np.random.choice(topics, p=transformed_probs)          

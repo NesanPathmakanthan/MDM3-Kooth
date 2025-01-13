@@ -1,0 +1,181 @@
+import pandas as pd
+import networkx as nx
+import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.metrics import normalized_mutual_info_score
+import community.community_louvain as community_louvain
+from scipy.sparse.linalg import eigsh
+from sklearn.cluster import KMeans
+from sklearn.metrics import adjusted_rand_score
+
+def calculate_stability(prev_clusters, current_clusters):
+    """Calculate the stability between current and previous clusters using Adjusted Rand Index."""
+    if prev_clusters is None:  # No previous clusters (first time frame)
+        return 0
+    return adjusted_rand_score(list(prev_clusters.values()), list(current_clusters.values()))
+
+def calculate_quality(graph, clusters):
+    """Calculate modularity as a measure of clustering quality."""
+    communities = [
+        [node for node, cluster_id in clusters.items() if cluster_id == k]
+        for k in set(clusters.values())
+    ]
+    return nx.algorithms.community.modularity(graph, communities)
+def objective_function(graph, prev_clusters, current_clusters, lambda_value=0.5):
+    """Combine stability and quality into a single objective function."""
+    stability = calculate_stability(prev_clusters, current_clusters)
+    quality = calculate_quality(graph, current_clusters)
+    return lambda_value * stability + (1 - lambda_value) * quality
+
+# Load the data
+file_path = '/Users/isobelbridge/Documents/mdm4/simulated_kooth_data.csv'
+df = pd.read_csv(file_path)
+
+# add a month column so can process the data monthly
+df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+df['Month'] = df['Timestamp'].dt.to_period('M')  # Converts to year-month format 
+
+# Get unique months in the dataset
+unique_months = df['Month'].unique()
+# Define a global node set containing all unique users in the dataset
+global_node_set = set(df['Service_User_ID'].unique())
+
+def process_time_frame_with_temporal(data_subset, title, prev_clusters=None, prev_eigenvectors=None, alpha=0.5, k=4, lambda_value=0.5, plot=False):
+    # Initialize topic distributions for all users
+    topic_counts = {user_id: {topic: 0 for topic in ["Anxiety", "Depression", "LGBTQ+", "Neurodiversity"]}
+                    for user_id in global_node_set}
+    
+    # Update topic counts based on active users in the current time frame
+    for _, row in data_subset.iterrows():
+        topic_counts[row['Service_User_ID']][row['Content_Topic']] += 1
+
+    # Calculate and normalize topic distributions
+    topic_distributions = {}
+    for user_id, counts in topic_counts.items():
+        total = sum(counts.values())
+        smoothing_factor = 1e-4
+        topic_distributions[user_id] = {topic: (counts[topic] + smoothing_factor) / (total + len(counts) * smoothing_factor)
+                                for topic in counts}
+
+    # Create user vectors for cosine similarity
+    user_vectors = {user: np.array(list(distribution.values())) for user, distribution in topic_distributions.items()}
+
+    # Build a graph with all users (even if isolated)
+    G_user = nx.DiGraph()
+    for user_id in global_node_set:
+        G_user.add_node(user_id)
+
+    # Add edges for active interactions in the current time frame
+    for _, row in data_subset.iterrows():
+        if not pd.isna(row['Ancestor_Content_ID']):
+            ancestor_row = data_subset[data_subset['Content_Created_ID'] == row['Ancestor_Content_ID']]
+            if not ancestor_row.empty:
+                ancestor_user_id = ancestor_row.iloc[0]['Service_User_ID']
+                current_user_id = row['Service_User_ID']
+                similarity = cosine_similarity(
+                    user_vectors[current_user_id].reshape(1, -1),
+                    user_vectors[ancestor_user_id].reshape(1, -1)
+                )[0, 0]
+                if G_user.has_edge(current_user_id, ancestor_user_id):
+                    G_user[current_user_id][ancestor_user_id]['weight'] += similarity
+                else:
+                    G_user.add_edge(current_user_id, ancestor_user_id, weight=similarity)
+
+    # Ensure adjacency matrix includes all users
+    nodes = list(global_node_set)
+    node_index = {node: i for i, node in enumerate(nodes)}
+    adjacency_matrix = np.zeros((len(nodes), len(nodes)))
+
+    for u, v, data in G_user.edges(data=True):
+        weight = data.get('weight', 1)
+        adjacency_matrix[node_index[u], node_index[v]] = weight
+
+    # Compute degree matrix and normalize the Laplacian
+    degree_matrix = np.diag(adjacency_matrix.sum(axis=1))
+    zero_degree_nodes = (degree_matrix.diagonal() == 0)
+    degree_matrix[zero_degree_nodes, zero_degree_nodes] = 1
+
+    D_inv_sqrt = np.zeros_like(degree_matrix)
+    for i in range(len(degree_matrix)):
+        if degree_matrix[i, i] > 0:
+            D_inv_sqrt[i, i] = 1.0 / np.sqrt(degree_matrix[i, i])
+
+    laplacian_matrix = np.eye(len(nodes)) - D_inv_sqrt @ adjacency_matrix @ D_inv_sqrt
+
+    # Compute eigenvectors
+    eigenvalues, eigenvectors = eigsh(laplacian_matrix, k, which='SM')
+
+    # Incorporate temporal regularization
+    if prev_eigenvectors is not None:
+        eigenvectors = (1 - alpha) * eigenvectors + alpha * prev_eigenvectors
+
+    # Apply k-means clustering
+    kmeans = KMeans(n_clusters=k, random_state=42)
+    cluster_labels = kmeans.fit_predict(eigenvectors)
+
+    # Map nodes to their clusters
+    current_clusters = {node: cluster_labels[i] for i, node in enumerate(nodes)}
+
+    # Calculate ground truth communities
+    ground_truth = {row['Service_User_ID']: row['Community_ID'] for _, row in data_subset.iterrows()}
+    true_labels = [ground_truth.get(node, -1) for node in nodes]
+
+    # Calculate NMI
+    nmi = normalized_mutual_info_score(true_labels, list(current_clusters.values()))
+
+    # Calculate stability and quality
+    stability = calculate_stability(prev_clusters, current_clusters)
+    quality = calculate_quality(G_user, current_clusters)
+    combined_score = lambda_value * stability + (1 - lambda_value) * quality
+
+    # Print metrics
+    print(f"{title} - NMI: {nmi:.4f}, Stability: {stability:.4f}, Quality: {quality:.4f}, Combined: {combined_score:.4f}")
+
+    # Optional: Visualize clusters
+    if plot:
+        pos = nx.kamada_kawai_layout(G_user)
+        plt.figure(figsize=(12, 8))
+        nx.draw(
+            G_user,
+            pos,
+            with_labels=True,
+            node_color=[current_clusters[node] for node in G_user.nodes()],
+            cmap=plt.cm.tab10,
+            node_size=600,
+            edge_color="gray"
+        )
+        plt.title(f"Spectral Clustering Results ({title})", fontsize=16)
+        plt.show()
+
+    return current_clusters, eigenvectors
+
+
+# Initialize a dictionary to track cluster sizes over time
+k = 4  # Number of clusters
+cluster_timelines = {i: [] for i in range(k)}
+
+# Initialize dictionary to store cluster assignments for each user by month
+clusters_by_month = {user_id: [] for user_id in global_node_set}
+
+# Initialize variables
+prev_eigenvectors = None
+prev_clusters = None
+lambda_value = 0.7  # Adjust based on stability vs. quality preference
+
+# Process each month
+for i, month in enumerate(unique_months):
+    data_subset = df[df['Month'] == month]
+    title = f"Month {month}"
+
+    # Process the time frame
+    clusters, prev_eigenvectors = process_time_frame_with_temporal(
+        data_subset, title, prev_clusters=prev_clusters, prev_eigenvectors=prev_eigenvectors, alpha=0.8, k=k, lambda_value=lambda_value, plot=(i == 0)
+    )
+
+    # Track cluster memberships
+    for user_id in global_node_set:
+        clusters_by_month[user_id].append(clusters.get(user_id, -1))
+
+    # Update previous clusters
+    prev_clusters = clusters

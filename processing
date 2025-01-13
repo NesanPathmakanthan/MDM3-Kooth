@@ -5,6 +5,8 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.metrics import normalized_mutual_info_score
 import community.community_louvain as community_louvain
+from scipy.optimize import linear_sum_assignment
+from sklearn.metrics import confusion_matrix, accuracy_score
 
 # Load the data
 file_path = '/Users/isobelbridge/Documents/mdm4/simulated_kooth_data.csv'
@@ -17,61 +19,89 @@ df['Month'] = df['Timestamp'].dt.to_period('M')  # Converts to year-month format
 # Get unique months in the dataset
 unique_months = df['Month'].unique()
 
-# function to seperate data into monthly time frames 
+# function to correctly align labels
+def relabel_clusters(true_labels, predicted_labels):
+    # compute the confusion matrix
+    cm = confusion_matrix(true_labels, predicted_labels)
+    
+    # Find the optimal label assignment using the Hungarian algorithm
+    row_ind, col_ind = linear_sum_assignment(-cm)  # Maximize agreement 
+    
+    # Create a mapping from predicted to true labels
+    label_mapping = {col: row for row, col in zip(row_ind, col_ind)}
+    
+    # Relabel predicted labels
+    relabeled = [label_mapping[label] if label in label_mapping else label for label in predicted_labels]
+    return relabeled
+
+# function to find communities
 def process_time_frame(data_subset, title, plot=False):
-    # Calculate topic distributions
+    # find the number of posts relating to each topic for each user
     topic_counts = {user_id: {topic: 0 for topic in ["Anxiety", "Depression", "LGBTQ+", "Neurodiversity"]}
                     for user_id in data_subset['Service_User_ID'].unique()}
     for _, row in data_subset.iterrows():
         topic_counts[row['Service_User_ID']][row['Content_Topic']] += 1
-    # calculate and normalise topic distributions for each individual user 
-    # allows to compare how similar each users posts are
+    # calulate and normalise the distributions of the topic count for each user
     topic_distributions = {}
     for user_id, counts in topic_counts.items():
         total = sum(counts.values())
         topic_distributions[user_id] = {topic: counts[topic] / total if total > 0 else 0 for topic in counts}
-    # for cosine similarity for edge weigtings 
+    # create user vectors for cosine similarity
     user_vectors = {user: np.array(list(distribution.values())) for user, distribution in topic_distributions.items()}
     # Build network
     G_user = nx.DiGraph()
     for user_id in data_subset['Service_User_ID'].unique():
         G_user.add_node(user_id)
-    # building a directed graph
+    # Add edges based on ancestor relationships
+    # loop through every post in the data
     for _, row in data_subset.iterrows():
-        # checking if current row has an ancestor amnd retrieving it 
+        # check if the post has an ancestor (so it's like replying to something)
         if not pd.isna(row['Ancestor_Content_ID']):
+            # find the ancestor post in the data
             ancestor_row = data_subset[data_subset['Content_Created_ID'] == row['Ancestor_Content_ID']]
-            # double checking that ancestor exsists (stops errors from missing ancestor content)
+            # make sure the ancestor actually exists (sometimes it might be in different time frame)
             if not ancestor_row.empty:
-                # extract users for the two pieces of content
+                # get the user who wrote the ancestor post and current post 
                 ancestor_user_id = ancestor_row.iloc[0]['Service_User_ID']
                 current_user_id = row['Service_User_ID']
-                # works out how similar those users content is for edges 
+                # calculate how similar their topic distribiutions (aka interests) are
                 similarity = cosine_similarity(
-                    user_vectors[current_user_id].reshape(1, -1),
-                    user_vectors[ancestor_user_id].reshape(1, -1)
-                )[0, 0]
+                    user_vectors[current_user_id].reshape(1, -1),  
+                    user_vectors[ancestor_user_id].reshape(1, -1) 
+                )[0, 0] 
+                
+                # check if there's already an edge between these two users in the graph
                 if G_user.has_edge(current_user_id, ancestor_user_id):
+                    # if there is, just add to the weight of that edge
                     G_user[current_user_id][ancestor_user_id]['weight'] += similarity
                 else:
+                    # if there isn't, create a new edge with the similarity as the weight
                     G_user.add_edge(current_user_id, ancestor_user_id, weight=similarity)
 
-    # Subgraph of only connected nodes 
-    # we're assuming people with no iteractions dont belong to a community 
+    
+    # Subgraph of connected nodes
     connected_nodes = {node for edge in G_user.edges() for node in edge}
     G_connected = G_user.subgraph(connected_nodes)
 
-    # actual communtiies
+    # actual communities
     ground_truth = {row['Service_User_ID']: row['Community_ID'] for _, row in data_subset.iterrows() if row['Service_User_ID'] in connected_nodes}
     true_labels = [ground_truth.get(node, -1) for node in G_connected.nodes()]
-
+    print(f"True Labels: {true_labels}")
+    
     # Louvain Community Detection
     louvain_partition = community_louvain.best_partition(G_connected.to_undirected(), weight='weight')
     louvain_labels = [louvain_partition.get(node, -1) for node in G_connected.nodes()]
-    louvain_nmi = normalized_mutual_info_score(true_labels, louvain_labels)
-    print(f"{title} - Louvain NMI: {louvain_nmi:.4f}")
+    #print(f"Louvain Labels: {louvain_labels}")
 
-    # Plot only for the first month
+    # relabel Louvain labels to match actual communities
+    relabeled_louvain_labels = relabel_clusters(true_labels, louvain_labels)
+    print(f"Relabeled Louvain Labels: {relabeled_louvain_labels}")
+
+    # compute accuracy
+    accuracy = accuracy_score(true_labels, relabeled_louvain_labels)
+    print(f"{title} - Louvain Accuracy: {accuracy:.4f}")
+
+    # Plot only for the first time frame
     if plot:
         pos = nx.kamada_kawai_layout(G_connected)
         plt.figure(figsize=(12, 6))
@@ -95,12 +125,12 @@ def process_time_frame(data_subset, title, plot=False):
             G_connected,
             pos,
             with_labels=True,
-            node_color=louvain_labels,
+            node_color=relabeled_louvain_labels,
             cmap=plt.cm.tab10,
             node_size=600,
             edge_color="gray"
         )
-        plt.title(f"{title} - Louvain Communities", fontsize=14)
+        plt.title(f"{title} - Louvain Communities (Relabeled)", fontsize=14)
 
         plt.tight_layout()
         plt.show()
